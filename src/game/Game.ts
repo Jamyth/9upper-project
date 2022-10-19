@@ -19,7 +19,7 @@ export class Game {
     players: string[];
     identityMap: Map<string, Identity>;
     playedQuestion: Question[];
-    question: Question | null
+    question: Question | null;
 
     constructor(players: string[]) {
         console.info(Questions);
@@ -56,7 +56,7 @@ export class Game {
         return this.identityMap;
     }
 
-    getNextQuestion() {
+    getNextQuestion(): Question {
         const randomId = Math.floor(Math.random() * Questions.length)
         const question = Questions[randomId];
 

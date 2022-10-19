@@ -1,13 +1,13 @@
 import {
     ConnectedSocket,
     MessageBody,
+    OnGatewayDisconnect,
     SubscribeMessage,
     WebSocketGateway,
-    WebSocketServer,
-    OnGatewayDisconnect
+    WebSocketServer
 } from '@nestjs/websockets';
 import {Server, Socket} from 'socket.io';
-import {Game} from './Game';
+import {Game, Identity} from './Game';
 import {PromiseUtil} from '@iamyth/util';
 
 interface Player {
@@ -53,7 +53,6 @@ export class GameGateway implements OnGatewayDisconnect {
 
     @SubscribeMessage("set-nickname")
     setNickname(@ConnectedSocket() socket: Socket, @MessageBody() nickname: string) {
-        console.info("set-nickname", nickname);
         if (this.playerNames.has((nickname))) {
             // 409 means conflict
             socket.emit("on-set-nickname-error", "名稱已重覆");
@@ -107,15 +106,36 @@ export class GameGateway implements OnGatewayDisconnect {
             return;
         }
 
-        this.gameInfo = new Game(Object.keys(this.playerSocketMap));
+        const playerSocketIds = this.playerSocketMap.keys();
+        this.gameInfo = new Game(Array.from(playerSocketIds));
 
         this.server.emit('on-game-start');
 
+        await this.startRound();
+    }
+
+    @SubscribeMessage('guess-player')
+    guessPlayer(@ConnectedSocket() socket: Socket, @MessageBody() playerName: string) {
+        let socketId: string | null = null;
+        this.playerSocketMap.forEach((nickname, id) => {
+            if(playerName === nickname) {
+                socketId = id;
+            }
+        });
+
+        if(!socketId || !this.gameInfo) {
+            return;
+        }
+
+        const guessResult = this.gameInfo.guess(socketId);
+
+        this.server.emit('on-guess-response', guessResult);
+    }
+
+    private async startRound() {
         this.distributeIdentity();
-
-        await PromiseUtil.sleep(3000);
-
-        this.drawNextQuestion();
+        await this.gameStartCountdown();
+        await this.drawNextQuestion();
     }
 
     private distributeIdentity() {
@@ -125,18 +145,49 @@ export class GameGateway implements OnGatewayDisconnect {
 
         const identityMap = this.gameInfo.distributeIdentity();
 
-        this.playerSocketMap.forEach((value, key) => {
-            const identity = identityMap.get(value);
-            this.server.to(key).emit('on-identity-received', identity)
-        });
+        identityMap.forEach((identity, socketId) => {
+            this.server.to(socketId).emit('on-identity-received', identity);
+        })
     }
 
-    private drawNextQuestion() {
+    private gameStartCountdown() {
+        return this.createTimeout('on-countdown-received', 3);
+    }
+
+    private async drawNextQuestion() {
         if (!this.gameInfo) {
             return;
         }
 
         const question = this.gameInfo.getNextQuestion();
-        this.server.emit('on-question-received', question)
+        this.gameInfo.identityMap.forEach((identity, socketId) => {
+            const modifiedQuestion = {
+                ...question
+            };
+
+            if(identity !== Identity.REAL_UPPER) {
+                modifiedQuestion.answer = null;
+                modifiedQuestion.type = null;
+            };
+
+            this.server.to(socketId).emit('on-question-received', modifiedQuestion)
+        });
+
+        await this.readQuestionCountdown();
+    }
+
+    private readQuestionCountdown() {
+        return this.createTimeout('on-read-question-timeout', 9)
+    }
+
+    private async createTimeout(message: string, count: number) {
+        if(!this.gameInfo) {
+            return;
+        }
+        for (let i = count; i > 0; i--) {
+            this.server.emit(message, i);
+            await PromiseUtil.sleep(1000);
+        }
+        this.server.emit(message, null);
     }
 }
